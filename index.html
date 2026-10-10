@@ -141,6 +141,16 @@ h1{font-size:2.6rem;line-height:1.15;margin:0 0 8px;font-weight:900;letter-spaci
 .opt{text-align:center;line-height:1.5}
 .steps i{min-width:0}
 .steps{gap:4px}
+.timer{position:sticky;top:0;z-index:5;background:var(--bg);padding:8px 0;display:flex;align-items:center;gap:10px;margin:0 0 4px;font-weight:700;font-variant-numeric:tabular-nums}
+.timer .tbar{flex:1;height:12px;border-radius:6px;background:var(--line);overflow:hidden}
+.timer .tbar i{display:block;height:100%;width:100%;background:var(--ink);transition:width .2s linear}
+.timer span.tl{min-width:4.2em;text-align:right}
+.timer.low{color:var(--bad)}
+.timer.low .tbar i{background:var(--bad)}
+.toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translate(-50%,20px);background:var(--ink);color:var(--paper);padding:12px 18px;border-radius:12px;font-weight:700;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:10;max-width:calc(100% - 32px);text-align:center}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+.who .warn{color:var(--bad);font-size:1.15rem}
+@media (prefers-reduced-motion: reduce){.timer .tbar i,.toast{transition:none}}
 </style>
 </head>
 <body>
@@ -167,6 +177,7 @@ h1{font-size:2.6rem;line-height:1.15;margin:0 0 8px;font-weight:900;letter-spaci
       <li>作答過程不提示對錯</li>
       <li>交卷後只顯示分數</li>
     </ol>
+    <p style="margin-top:6px"><b>每小題都有時間限制</b>，時間到自動以答錯計算。作答中切換到其他 App 或分頁，會被記錄在成績頁。</p>
   </div>
   <p class="note" id="bestNote"></p>
   <p class="note">題目數字為教學用虛構資料，不代表真實圖譜位置。</p>
@@ -175,6 +186,7 @@ h1{font-size:2.6rem;line-height:1.15;margin:0 0 8px;font-weight:900;letter-spaci
 <section id="game" class="hidden">
   <div class="top"><span id="roundInfo"></span><span id="partInfo"></span></div>
   <div class="steps" id="steps"></div>
+  <div class="timer" id="timer"><div class="tbar"><i id="tfill"></i></div><span class="tl">剩 <span id="tleft">0</span> 秒</span></div>
   <div class="setup" id="setup"></div>
   <div class="ask" id="ask"></div>
   <p style="text-align:center;margin-top:16px"><button class="home-link" id="quit">回首頁</button></p>
@@ -198,6 +210,7 @@ h1{font-size:2.6rem;line-height:1.15;margin:0 0 8px;font-weight:900;letter-spaci
   </div>
 </section>
 </main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 (function(){
 const $=s=>document.querySelector(s);
@@ -240,11 +253,39 @@ const Q=[
    {q:'(c) 三個基因的順序？',opts:[`${g('a')} – ${g('b')} – ${g('c')}`,`${g('b')} – ${g('a')} – ${g('c')}`,`${g('a')} – ${g('c')} – ${g('b')}`],ans:0,wide:true}
   ]}
 ];
+/* guard: 限時與離開頁面偵測 */
+const G={leaves:0,timeouts:0,away:false,active:false,tid:null,deadline:0,sec:0,cb:null};
+function gReset(){G.leaves=0;G.timeouts=0;G.away=false;G.active=true;}
+function markLeave(){if(!G.active||G.away)return;G.away=true;G.leaves++;}
+function markBack(){if(!G.away)return;G.away=false;if(G.active)toast(`已記錄：離開頁面 ${G.leaves} 次`);}
+document.addEventListener('visibilitychange',()=>{document.hidden?markLeave():markBack();});
+window.addEventListener('blur',markLeave);
+window.addEventListener('focus',markBack);
+window.addEventListener('pagehide',markLeave);
+let toastT=null;
+function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('on');clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('on'),2600);}
+function startTimer(sec,cb){stopTimer();G.sec=sec;G.deadline=Date.now()+sec*1000;G.cb=cb;tick();G.tid=setInterval(tick,200);}
+function stopTimer(){if(G.tid)clearInterval(G.tid);G.tid=null;}
+function tick(){
+  const left=Math.max(0,G.deadline-Date.now()),f=$('#tfill');
+  f.style.width=(left/(G.sec*1000)*100)+'%';
+  const s=Math.ceil(left/1000);$('#tleft').textContent=s;
+  $('#timer').classList.toggle('low',s<=5);
+  if(left<=0){stopTimer();G.timeouts++;toast('時間到，此題以答錯計算');const cb=G.cb;G.cb=null;cb&&cb();}
+}
+function gEnd(){stopTimer();G.active=false;}
+function guardLines(){
+  const lv=G.leaves>0?`<div class="warn">離開頁面：<b>${G.leaves} 次</b></div>`:`<div>離開頁面：<b>0 次</b></div>`;
+  return lv+`<div>逾時：<b>${G.timeouts}</b> 步</div>`;
+}
+
+/* 每小題秒數（每大題第 1 小題另加 10 秒讀題） */
+const SEC=[[20,15,20],[25,25,15],[25,25,25],[15,20,25]];
 const TOTAL=Q.reduce((s,q)=>s+q.subs.length,0);
 
 let qi=0,si=0,pick=null,right=[],order=[],t0=0,qStart=0,times=[],S_end=null;
 function show(id){['home','game','final'].forEach(s=>$('#'+s).classList.toggle('hidden',s!==id));window.scrollTo(0,0);}
-function start(){qi=0;si=0;right=Q.map(()=>0);t0=Date.now();qStart=t0;times=Q.map(()=>0);
+function start(){gReset();qi=0;si=0;right=Q.map(()=>0);t0=Date.now();qStart=t0;times=Q.map(()=>0);
   order=Q.map(q=>q.subs.map(s=>shuffle(s.opts.map((_,i)=>i))));
   show('game');render(true);}
 function flat(){let n=0;for(let i=0;i<qi;i++)n+=Q[i].subs.length;return n+si;}
@@ -261,11 +302,12 @@ function render(newQ){
   $('#ask').querySelectorAll('.opt').forEach(b=>b.addEventListener('click',()=>{
     $('#ask').querySelectorAll('.opt').forEach(x=>{x.classList.remove('picked');x.setAttribute('aria-pressed','false');});
     b.classList.add('picked');b.setAttribute('aria-pressed','true');pick=+b.dataset.i;$('#confirm').disabled=false;}));
-  $('#confirm').addEventListener('click',submit);
+  $('#confirm').addEventListener('click',()=>submit(false));
+  startTimer(SEC[qi][si]+(si===0?10:0),()=>submit(true));
 }
-function submit(){
-  if(pick===null)return;
-  if(pick===Q[qi].subs[si].ans) right[qi]++;
+function submit(to){
+  if(to!==true&&pick===null)return;
+  if(to!==true&&pick===Q[qi].subs[si].ans) right[qi]++;
   si++;
   if(si>=Q[qi].subs.length){times[qi]=Date.now()-qStart;qStart=Date.now();si=0;qi++;if(qi>=Q.length){finish();return;}render(true);window.scrollTo(0,0);}
   else{render(false);$('#ask').scrollIntoView({block:'nearest'});}
@@ -276,6 +318,7 @@ const fmt=ms=>{const s=Math.round(ms/1000);return s>=60?`${Math.floor(s/60)} 分
 const pad=n=>String(n).padStart(2,'0');
 const esc=t=>t.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function finish(){
+  gEnd();
   const end=new Date();S_end={end,total:end-t0};
   const n=right.reduce((a,b)=>a+b,0),score=Math.round(n/TOTAL*100),best=Math.max(getB(),score);setB(best);
   $('#finalScore').textContent=score;
@@ -289,7 +332,7 @@ function finish(){
 function revealScore(){
   const id=$('#sid').value.trim(),nm=$('#sname').value.trim();if(!id||!nm)return;
   const e=S_end.end;
-  $('#who').innerHTML=`<div>學號：<b>${esc(id)}</b></div><div>姓名：<b>${esc(nm)}</b></div><div>完成時間：${e.getFullYear()}/${pad(e.getMonth()+1)}/${pad(e.getDate())} ${pad(e.getHours())}:${pad(e.getMinutes())}</div><div>總作答時間：<b>${fmt(S_end.total)}</b></div>`;
+  $('#who').innerHTML=`<div>學號：<b>${esc(id)}</b></div><div>姓名：<b>${esc(nm)}</b></div><div>完成時間：${e.getFullYear()}/${pad(e.getMonth()+1)}/${pad(e.getDate())} ${pad(e.getHours())}:${pad(e.getMinutes())}</div><div>總作答時間：<b>${fmt(S_end.total)}</b></div>${guardLines()}`;
   $('#idForm').classList.add('hidden');$('#result').classList.remove('hidden');window.scrollTo(0,0);
 }
 function note(){const b=getB();$('#bestNote').textContent=b?`最佳紀錄：${b} 分`:'';}
@@ -297,7 +340,7 @@ $('#start').addEventListener('click',start);
 ['#sid','#sname'].forEach(s=>$(s).addEventListener('input',()=>{$('#showScore').disabled=!($('#sid').value.trim()&&$('#sname').value.trim());}));
 $('#showScore').addEventListener('click',revealScore);
 $('#toHome').addEventListener('click',()=>{show('home');note();});
-$('#quit').addEventListener('click',()=>{if(confirm('確定要離開嗎？這次的作答不會保留。')){show('home');note();}});
+$('#quit').addEventListener('click',()=>{const was=G.active;G.active=false;if(confirm('確定要離開嗎？這次的作答不會保留。')){gEnd();show('home');note();} else G.active=was;});
 note();
 })();
 </script>
